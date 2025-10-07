@@ -1,0 +1,246 @@
+"""
+AI-Powered Study Buddy
+Streamlit app (single-file) for: summarize, explain, generate quizzes and flashcards.
+
+Instructions:
+- Set environment variable OPENAI_API_KEY or paste the key in the sidebar.
+- Install requirements: `pip install -r requirements.txt`
+- Run: `streamlit run streamlit_ai_study_buddy_app.py`
+
+Notes:
+- This app uses OpenAI's API (GPT-4/3.5) -- adjust model names per your access.
+- PDF extraction uses pdfplumber. For large PDFs, extraction may be slow.
+"""
+
+import os
+import io
+import json
+import textwrap
+from typing import Tuple, List
+
+import streamlit as st
+
+try:
+    import openai
+except Exception:
+    openai = None
+
+try:
+    import pdfplumber
+except Exception:
+    pdfplumber = None
+
+# --------------------------- Helper functions ---------------------------
+
+def init_openai(api_key: str):
+    if openai is None:
+        raise RuntimeError("openai package is not installed. Install it with `pip install openai`.")
+    openai.api_key = api_key
+
+
+def extract_text_from_pdf(file_bytes: bytes) -> str:
+    if pdfplumber is None:
+        raise RuntimeError("pdfplumber not installed. Install with `pip install pdfplumber`.")
+    text_pages = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text()
+            if txt:
+                text_pages.append(txt)
+    return "\n\n".join(text_pages)
+
+
+def call_openai_chat(prompt: str, model: str = "gpt-4o-mini", max_tokens: int = 512, temperature: float = 0.2) -> str:
+    # wrapper for ChatCompletion or Chat API. Adjust to your OpenAI SDK.
+    if openai is None:
+        raise RuntimeError("openai package not installed")
+    try:
+        # Use chat completions
+        if hasattr(openai, "ChatCompletion"):
+            resp = openai.ChatCompletion.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return resp.choices[0].message.content.strip()
+        else:
+            # Fallback to Completion
+            resp = openai.Completion.create(
+                model=model,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            return resp.choices[0].text.strip()
+    except Exception as e:
+        return f"[OpenAI API error] {e}"
+
+
+def make_summary(text: str) -> str:
+    prompt = textwrap.dedent(f"""
+    Summarize the following study material into concise, easy-to-review bullet points. Keep the language simple and highlight key definitions, formulas, and examples where applicable. Use numbered sections if multiple topics exist.
+
+    Material:
+    {text}
+
+    Provide a short title, then the summary as bullets.
+    """)
+    return call_openai_chat(prompt, max_tokens=800)
+
+
+def make_explanation(text: str, level: str = "high-school") -> str:
+    prompt = textwrap.dedent(f"""
+    Explain the following content in a clear, student-friendly way suitable for a {level} student. Use analogies, simple examples, and step-by-step reasoning. Keep the explanation short but thorough.
+
+    Topic / Content:
+    {text}
+    """)
+    return call_openai_chat(prompt, max_tokens=800)
+
+
+def make_quiz(text: str, num_questions: int = 5) -> str:
+    prompt = textwrap.dedent(f"""
+    Create {num_questions} multiple-choice questions (each with 4 options and one correct answer) based on the following study material. Provide answers and short explanations after each question.
+
+    Material:
+    {text}
+    """)
+    return call_openai_chat(prompt, max_tokens=1000)
+
+
+def make_flashcards(text: str, num_cards: int = 10) -> str:
+    prompt = textwrap.dedent(f"""
+    Create up to {num_cards} flashcards (Question: Answer) from the following text. Keep questions short and answers concise.
+
+    Material:
+    {text}
+    """)
+    return call_openai_chat(prompt, max_tokens=800)
+
+
+# --------------------------- Streamlit UI ---------------------------
+
+def main():
+    st.set_page_config(page_title="AI Study Buddy", layout="wide")
+
+    st.title("📚 AI-Powered Study Buddy")
+    st.write("Simplify topics, summarize notes, and generate quizzes/flashcards using AI — all in a Streamlit app.")
+
+    # Sidebar - API Key & Settings
+    st.sidebar.header("Configuration")
+    api_key_input = st.sidebar.text_input("OpenAI API Key", type="password")
+    api_from_env = os.environ.get("OPENAI_API_KEY")
+    if not api_key_input and api_from_env:
+        api_key_input = api_from_env
+        st.sidebar.caption("API key loaded from environment variable OPENAI_API_KEY")
+
+    model = st.sidebar.selectbox("Model", options=["gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"], index=0)
+    temperature = st.sidebar.slider("Temperature", min_value=0.0, max_value=1.0, value=0.2)
+
+    if api_key_input:
+        try:
+            init_openai(api_key_input)
+            st.sidebar.success("API key set")
+        except Exception as e:
+            st.sidebar.error(f"Error setting API key: {e}")
+    else:
+        st.sidebar.warning("Please provide your OpenAI API key (required to call the model).")
+
+    # Main layout
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.subheader("Input")
+        input_mode = st.radio("Input mode", options=["Paste text", "Upload file (PDF/TXT)", "Type topic/question"], index=0)
+
+        user_text = ""
+        uploaded_file = None
+        if input_mode == "Paste text":
+            user_text = st.text_area("Paste your notes or content here", height=250)
+        elif input_mode == "Upload file (PDF/TXT)":
+            uploaded_file = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"]) 
+            if uploaded_file is not None:
+                file_bytes = uploaded_file.read()
+                if uploaded_file.type == "application/pdf":
+                    try:
+                        with st.spinner("Extracting text from PDF..."):
+                            user_text = extract_text_from_pdf(file_bytes)
+                            st.success("Extracted text from PDF (first 10,000 chars shown)")
+                    except Exception as e:
+                        st.error(f"PDF extraction error: {e}")
+                else:
+                    user_text = file_bytes.decode("utf-8", errors="ignore")
+        else:
+            topic = st.text_input("Enter a topic or question")
+            if topic:
+                user_text = topic
+
+        st.markdown("---")
+        st.subheader("Actions")
+        explain_btn = st.button("Generate Explanation")
+        summarize_btn = st.button("Summarize Notes")
+        quiz_btn = st.button("Generate Quiz")
+        flashcard_btn = st.button("Generate Flashcards")
+
+        num_q = st.number_input("Number of quiz questions", min_value=1, max_value=20, value=5)
+        num_cards = st.number_input("Number of flashcards", min_value=1, max_value=50, value=10)
+
+    with col2:
+        st.subheader("Output")
+        output_area = st.empty()
+
+        if not api_key_input:
+            output_area.info("Provide your OpenAI API key in the sidebar to enable AI features.")
+        else:
+            if explain_btn:
+                if not user_text.strip():
+                    st.error("Please provide text or a topic to explain.")
+                else:
+                    with st.spinner("Generating explanation..."):
+                        explanation = make_explanation(user_text, level="college")
+                    st.markdown("**Explanation:**")
+                    st.write(explanation)
+                    st.download_button("Download Explanation", explanation, file_name="explanation.txt")
+
+            if summarize_btn:
+                if not user_text.strip():
+                    st.error("Please provide text or upload a file to summarize.")
+                else:
+                    with st.spinner("Generating summary..."):
+                        summary = make_summary(user_text)
+                    st.markdown("**Summary:**")
+                    st.write(summary)
+                    st.download_button("Download Summary", summary, file_name="summary.txt")
+
+            if quiz_btn:
+                if not user_text.strip():
+                    st.error("Please provide material to generate quiz from.")
+                else:
+                    with st.spinner("Generating quiz..."):
+                        quiz_text = make_quiz(user_text, num_questions=int(num_q))
+                    st.markdown("**Quiz:**")
+                    st.write(quiz_text)
+                    st.download_button("Download Quiz", quiz_text, file_name="quiz.txt")
+
+            if flashcard_btn:
+                if not user_text.strip():
+                    st.error("Please provide material for flashcards.")
+                else:
+                    with st.spinner("Generating flashcards..."):
+                        cards = make_flashcards(user_text, num_cards=int(num_cards))
+                    st.markdown("**Flashcards:**")
+                    st.write(cards)
+                    st.download_button("Download Flashcards", cards, file_name="flashcards.txt")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Tips:**\n- For best results, paste 1–5 pages of focused notes rather than an entire textbook.\n- Use headings in notes to keep summaries organized.\n- Adjust temperature for more creative (higher) or factual (lower) responses.")
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("Made with ❤️ — AI Study Buddy")
+    st.sidebar.markdown("Works only on Open AI api ❤️")
+
+
+
+if __name__ == '__main__':
+    main()
